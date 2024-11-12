@@ -5,13 +5,14 @@ addEventListener('fetch', event => {
 async function handleRequest(request) {
   const url = new URL(request.url)
   const domain = url.searchParams.get('domain')
+  const size = url.searchParams.get('size') || '128'
 
   if (!domain) {
     return new Response('Domain parameter is required', { status: 400 })
   }
 
   // 尝试获取 favicon
-  const faviconUrl = await getFaviconUrl(domain)
+  const faviconUrl = await getFaviconUrl(domain, size)
   if (faviconUrl) {
     return fetchFavicon(faviconUrl)
   } else {
@@ -19,8 +20,9 @@ async function handleRequest(request) {
   }
 }
 
-async function getFaviconUrl(domain) {
+async function getFaviconUrl(domain, size) {
   const defaultPaths = [
+    `https://api.faviconkit.com/${domain}/${size}`,
     `https://${domain}/favicon.ico`,
     `https://${domain}/favicon.png`,
     `https://${domain}/favicon.gif`,
@@ -29,33 +31,36 @@ async function getFaviconUrl(domain) {
     `https://${domain}/favicon.webp`
   ];
 
-  // 尝试访问默认的 favicon 路径
-  for (const path of defaultPaths) {
-    const response = await fetch(path, { method: 'GET' });
-    if (response.ok) {
-      return path;
-    }
+  // 并行请求所有默认路径
+  const fetchPromises = defaultPaths.map(async (path) => {
+    const response = await fetchWithTimeout(path);
+    return response.ok ? path : null;
+  });
+
+  const results = await Promise.all(fetchPromises);
+  return results.find(url => url !== null) || null;
+}
+
+async function fetchWithTimeout(url, timeout = 5000) {
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const fetchPromise = fetch(url, {
+    method: 'GET',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    },
+    signal
+  });
+
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await fetchPromise;
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    console.error(`Fetch error for ${url}: ${error.message}`);
+    return new Response('Error fetching favicon', { status: 500 });
   }
-
-  // 抓取首页 HTML
-  const homepageUrl = `https://${domain}`;
-  const homepageResponse = await fetch(homepageUrl);
-  if (!homepageResponse.ok) {
-    return null;
-  }
-
-  const html = await homepageResponse.text();
-  const faviconUrls = extractFaviconUrls(html, homepageUrl);
-
-  // 返回第一个有效的 favicon URL
-  for (const faviconUrl of faviconUrls) {
-    const response = await fetch(faviconUrl, { method: 'GET' });
-    if (response.ok) {
-      return faviconUrl;
-    }
-  }
-
-  return null;
 }
 
 function extractFaviconUrls(html, homepageUrl) {
@@ -78,7 +83,7 @@ function extractFaviconUrls(html, homepageUrl) {
 
 async function fetchFavicon(faviconUrl) {
   try {
-    const response = await fetch(faviconUrl, { method: 'GET' });
+    const response = await fetchWithTimeout(faviconUrl);
     if (!response.ok) {
       throw new Error('Failed to fetch favicon');
     }
